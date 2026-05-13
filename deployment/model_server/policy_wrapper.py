@@ -29,6 +29,7 @@ import torch
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import read_mode_config
+from starVLA.model.modules.action_model.rtc import RTCConfig, build_rtc_metadata
 
 from deployment.model_server.policy_norm_processor import PolicyNormProcessor
 
@@ -160,3 +161,46 @@ class PolicyServerWrapper:
             axis=0,
         )
         return {"actions": unnorm}
+
+    def predict_action_rtc(
+        self,
+        examples: List[dict],
+        rtc: dict | RTCConfig | None = None,
+        **kwargs,
+    ) -> Dict[str, np.ndarray]:
+        """Run RTC inference and return normalized actions only.
+
+        RTC guidance and client queue merging both operate in normalized action
+        space, so this path intentionally bypasses ``PolicyNormProcessor``.
+        """
+
+        import time
+
+        start = time.perf_counter()
+        rtc_config = RTCConfig.from_any(rtc)
+        rtc_payload = rtc if isinstance(rtc, dict) else {}
+        prev_chunk_left_over = rtc_payload.get("prev_chunk_left_over")
+        inference_delay = int(rtc_payload.get("inference_delay", 0))
+
+        out = self._framework.predict_action_rtc(examples=examples, rtc=rtc, **kwargs)
+        normalized = np.asarray(out["normalized_actions"])
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+        rtc_metadata = out.get("rtc") or build_rtc_metadata(
+            rtc_config=rtc_config,
+            chunk_size=normalized.shape[1],
+            action_dim=normalized.shape[-1],
+            prev_chunk_left_over=prev_chunk_left_over,
+            inference_delay=inference_delay,
+            applied=bool(rtc_config.enabled and prev_chunk_left_over is not None),
+        )
+        rtc_metadata = dict(rtc_metadata)
+        rtc_metadata["server_elapsed_ms"] = elapsed_ms
+        rtc_metadata["recommended_skip_steps"] = min(
+            max(inference_delay, 0),
+            max(int(normalized.shape[1]) - 1, 0),
+        )
+        return {
+            "normalized_actions": normalized,
+            "rtc": rtc_metadata,
+        }

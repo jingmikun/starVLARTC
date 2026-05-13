@@ -130,6 +130,12 @@ class baseframework(PreTrainedModel):
             f"{type(self).__name__} must implement predict_action(examples) -> dict with 'normalized_actions' key."
         )
 
+    def predict_action_rtc(self, examples: List[dict], rtc: dict | None = None, **kwargs) -> dict:
+        """RTC inference: predict normalized actions with optional real-time chunking guidance."""
+        raise NotImplementedError(
+            f"unsupported_rtc_head: {type(self).__name__} does not implement predict_action_rtc()."
+        )
+
     # ------------------------------------------------------------------
     # Unified loss interface for Trainer
     # ------------------------------------------------------------------

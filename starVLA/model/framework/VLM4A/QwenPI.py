@@ -25,6 +25,7 @@ IGNORE_INDEX = -100
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config, populate_layerwise_dit_cfg
 from starVLA.model.modules.action_model.LayerwiseFM_ActionHeader import LayerwiseFlowmatchingActionHead, get_action_model
+from starVLA.model.modules.action_model.rtc import RTCConfig, build_rtc_metadata
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 from starVLA.training.trainer_utils.trainer_tools import resize_images
@@ -285,6 +286,72 @@ class Qwen_PI(baseframework):
 
         normalized_actions = pred_actions.detach().cpu().numpy()
         return {"normalized_actions": normalized_actions}
+
+    def predict_action_rtc(
+        self,
+        examples: List[dict] = None,
+        rtc: dict | RTCConfig | None = None,
+        **kwargs,
+    ) -> dict:
+        rtc_config = RTCConfig.from_any(rtc)
+        rtc_payload = rtc if isinstance(rtc, dict) else {}
+        prev_chunk_left_over = rtc_payload.get("prev_chunk_left_over")
+        inference_delay = int(rtc_payload.get("inference_delay", 0))
+
+        if not rtc_config.enabled or prev_chunk_left_over is None:
+            out = self.predict_action(examples=examples, **kwargs)
+            out["rtc"] = build_rtc_metadata(
+                rtc_config=rtc_config,
+                chunk_size=self.action_horizon,
+                action_dim=int(self.config.framework.action_model.action_dim),
+                prev_chunk_left_over=prev_chunk_left_over,
+                inference_delay=inference_delay,
+                applied=False,
+            )
+            return out
+
+        if type(examples) is not list:
+            examples = [examples]
+
+        batch_images = [to_pil_preserve(example["image"]) for example in examples]
+        instructions = [example["lang"] for example in examples]
+        state = [example["state"] for example in examples] if "state" in examples[0] else None
+
+        train_obs_image_size = getattr(self.config.datasets.vla_data, "obs_image_size", None)
+        if train_obs_image_size:
+            batch_images = resize_images(batch_images, target_size=train_obs_image_size)
+
+        with torch.no_grad():
+            vl_embs_list = self._encode_vl_hidden_states(batch_images, instructions)
+            base_hidden = vl_embs_list[-1]
+            state = (
+                torch.from_numpy(np.array(state)).to(base_hidden.device, dtype=base_hidden.dtype)
+                if state is not None
+                else None
+            )
+
+        with torch.enable_grad():
+            with torch.autocast("cuda", dtype=torch.float32):
+                pred_actions = self.action_model.predict_action_rtc(
+                    vl_embs_list,
+                    state,
+                    prev_chunk_left_over=prev_chunk_left_over,
+                    inference_delay=inference_delay,
+                    rtc_config=rtc_config,
+                )
+
+        normalized_actions = pred_actions.detach().cpu().numpy()
+        return {
+            "normalized_actions": normalized_actions,
+            "rtc": build_rtc_metadata(
+                rtc_config=rtc_config,
+                chunk_size=self.action_horizon,
+                action_dim=normalized_actions.shape[-1],
+                prev_chunk_left_over=prev_chunk_left_over,
+                inference_delay=inference_delay,
+                applied=True,
+            ),
+        }
 
 
 if __name__ == "__main__":

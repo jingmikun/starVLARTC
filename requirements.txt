@@ -30,6 +30,7 @@ diffusers
 timm
 tyro
 websockets
+msgpack
 tdigest==0.5.2.2
 
 # env for qwen3.5 tip: flash-linear-attention 会导致过去的版本不兼容，导致之前的ckpt 性能下降

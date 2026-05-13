@@ -137,6 +137,37 @@ class WebsocketPolicyServer:
                 "data": data,
             }
 
+        elif mtype == "infer_rtc" or mtype == "predict_action_rtc":
+            if not isinstance(payload, dict):
+                return {
+                    "status": "error",
+                    "ok": False,
+                    "type": "rtc_inference_result",
+                    "request_id": req_id,
+                    "error": {"message": "Payload must be a dict", "payload_type": str(type(payload))},
+                }
+            try:
+                output_dict = self._policy.predict_action_rtc(**payload)
+            except Exception as e:
+                logging.exception("Policy RTC inference error (request_id=%s)", req_id)
+                logging.exception(e)
+                return {
+                    "status": "error",
+                    "ok": False,
+                    "type": "rtc_inference_result",
+                    "request_id": req_id,
+                    "error": {
+                        "message": str(e),
+                    },
+                }
+            return {
+                "status": "ok",
+                "ok": True,
+                "type": "rtc_inference_result",
+                "request_id": req_id,
+                "data": output_dict,
+            }
+
         # unknow request type
         else:
             return {

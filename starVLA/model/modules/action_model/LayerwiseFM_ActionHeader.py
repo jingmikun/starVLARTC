@@ -17,6 +17,11 @@ from starVLA.model.modules.action_model.flow_matching_head.action_encoder import
     swish,
 )
 from starVLA.model.modules.action_model.flow_matching_head.cross_attention_dit import DiT
+from starVLA.model.modules.action_model.rtc import (
+    RTCConfig,
+    apply_rtc_guidance,
+    prepare_prev_chunk_left_over,
+)
 
 # TODO try to meger DiT Modules with follow_match_head, they are just the same arch, but diff loss, use diffusers package will be simple
 
@@ -399,6 +404,83 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
 
             # Euler integration
             actions = actions + dt * pred_velocity
+        return actions
+
+    def predict_action_rtc(
+        self,
+        vl_embs_list: list,
+        state: torch.Tensor = None,
+        *,
+        prev_chunk_left_over: torch.Tensor = None,
+        inference_delay: int = 0,
+        rtc_config: RTCConfig | dict | None = None,
+    ) -> torch.Tensor:
+        """Return a normalized action chunk with RTC guidance applied during flow sampling."""
+
+        rtc_config = RTCConfig.from_any(rtc_config)
+        if not rtc_config.enabled or prev_chunk_left_over is None:
+            return self.predict_action(vl_embs_list, state)
+
+        batch_size = vl_embs_list[0].shape[0]
+        device = vl_embs_list[0].device
+        actions = torch.randn(
+            size=(batch_size, self.action_horizon, self.action_dim),
+            dtype=vl_embs_list[0].dtype,
+            device=device,
+        )
+        prev_chunk_left_over = prepare_prev_chunk_left_over(
+            prev_chunk_left_over,
+            batch_size=batch_size,
+            action_dim=self.action_dim,
+            device=device,
+            dtype=vl_embs_list[0].dtype,
+        )
+
+        num_steps = self.num_inference_timesteps
+        dt = 1.0 / num_steps
+
+        state_features = self.state_encoder(state) if state is not None else None
+
+        for t in range(num_steps):
+            t_cont = t / float(num_steps)
+            t_discretized_int = int(t_cont * self.num_timestep_buckets)
+            actions = actions.detach().requires_grad_(True)
+            timesteps_tensor = torch.full(
+                size=(batch_size,), fill_value=t_discretized_int, device=device, dtype=torch.long
+            )
+
+            action_features = self.action_encoder(actions, timesteps_tensor)
+            if self.config.add_pos_embed:
+                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                action_features = action_features + pos_embs
+
+            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
+            sa_embs = (
+                torch.cat((state_features, future_tokens, action_features), dim=1)
+                if state_features is not None
+                else torch.cat((future_tokens, action_features), dim=1)
+            )
+
+            temb = self.model.timestep_encoder(timesteps_tensor)
+            model_output = sa_embs
+            for layer_idx, layer in enumerate(self.model.transformer_blocks):
+                model_output = layer(
+                    hidden_states=model_output,
+                    encoder_hidden_states=vl_embs_list[layer_idx],
+                    temb=temb,
+                )
+            pred = self.action_decoder(model_output)
+            pred_velocity = pred[:, -self.action_horizon :]
+            guided_velocity, _ = apply_rtc_guidance(
+                actions,
+                pred_velocity,
+                t_cont=t_cont,
+                prev_chunk_left_over=prev_chunk_left_over,
+                inference_delay=inference_delay,
+                rtc_config=rtc_config,
+            )
+            actions = (actions + dt * guided_velocity).detach()
         return actions
 
     @property

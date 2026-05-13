@@ -73,3 +73,27 @@ class WebsocketClientPolicy:
         if isinstance(response, str):
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
+
+    def predict_action_rtc(
+        self,
+        examples,
+        rtc: Dict,
+        request_id: str | None = None,
+        **kwargs,
+    ) -> Dict:
+        payload = {
+            "examples": examples,
+            "rtc": rtc,
+        }
+        payload.update(kwargs)
+        query_info = {
+            "type": "infer_rtc",
+            "request_id": request_id or "default",
+            "payload": payload,
+        }
+        data = self._packer.pack(query_info)
+        self._ws.send(data)
+        response = self._ws.recv()
+        if isinstance(response, str):
+            raise RuntimeError(f"Error in inference server:\n{response}")
+        return msgpack_numpy.unpackb(response)
